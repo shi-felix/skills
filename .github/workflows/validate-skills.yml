@@ -1,0 +1,62 @@
+name: Validate skills
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 校验目录结构
+        run: |
+          fail=0
+          for d in */; do
+            name="${d%/}"
+            [ -f "$name/SKILL.md" ] || continue
+            echo "── $name"
+
+            # frontmatter 必须有 name 和 description
+            head -n 20 "$name/SKILL.md" | grep -q '^name: ' \
+              || { echo "  ❌ SKILL.md 缺 name"; fail=1; }
+            head -n 20 "$name/SKILL.md" | grep -q '^description: ' \
+              || { echo "  ❌ SKILL.md 缺 description"; fail=1; }
+
+            # description 里要有触发词，否则永远不会被选中
+            desc=$(sed -n 's/^description: //p' "$name/SKILL.md" | head -1)
+            echo "$desc" | grep -qE '触发词|Triggers?|triggers' \
+              || echo "  ⚠️  description 里没有触发词（不影响运行，但可能永远不被选中）"
+
+            # 脚本必须能编译
+            if [ -d "$name/scripts" ]; then
+              find "$name/scripts" -name '*.py' -print0 \
+                | xargs -0 -r python -m py_compile \
+                || { echo "  ❌ scripts 编译失败"; fail=1; }
+              echo "  ✅ scripts 编译通过"
+            fi
+          done
+          exit $fail
+
+      - name: 检查不该提交的文件
+        run: |
+          bad=$(git ls-files | grep -E '__pycache__|\.pyc$|\.DS_Store|Thumbs\.db' || true)
+          if [ -n "$bad" ]; then
+            echo "❌ 提交了不该进仓库的文件："; echo "$bad"; exit 1
+          fi
+          echo "✅ 无垃圾文件"
+
+      - name: 检查 CRLF
+        run: |
+          bad=$(git ls-files '*.md' '*.py' | xargs -r grep -lU $'\r' || true)
+          if [ -n "$bad" ]; then
+            echo "❌ 这些文件是 CRLF，会破坏字符串匹配："; echo "$bad"; exit 1
+          fi
+          echo "✅ 全部 LF"
