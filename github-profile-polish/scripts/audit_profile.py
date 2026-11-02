@@ -344,7 +344,7 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
         level = "strong"
     else:
         level = "weak"
-    target = must if level == "weak" else suggest
+    target = suggest
 
     add(f"# GitHub 主页审计 · `{user['login']}`\n")
     star_txt = f"★{max_star}" if max_star >= 0 else "取不到（无 token 且页面解析失败）"
@@ -352,11 +352,11 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
         f"· 账号创建于 {str(user['created_at'])[:10]}"
         f" · 最强 pinned 仓库 {star_txt}\n")
     if level == "strong":
-        add("> 信号强度：**强**（已有 ★≥500 的仓库）。这一档的仓库本身就能说话，"
-            "主页美化是可选项，过度装饰反而是负分。以下问题按「建议」处理。\n")
+        add("> 置顶仓库已有较高关注度。可以突出真实作品和贡献；是否重做视觉仍由用户决定，"
+            "不根据 star 数限制风格选择。\n")
     elif level == "weak":
-        add("> 信号强度：**弱**（没有 ★≥500 的仓库）。这一档主页是主要可控面，"
-            "以下问题按「必须修」处理。\n")
+        add("> 当前没有高关注度置顶仓库。这不表示能力弱，也不影响美化主页；"
+            "可以从个人介绍、作品或文章开始，下面的内容建议并非必填清单。\n")
     else:
         add("> 信号强度：**未能判定**——pin 的仓库一个 star 数都没取到。"
             "配一个 GITHUB_TOKEN 重跑就能确定分档；在此之前不要把下面的清单当"
@@ -386,7 +386,7 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
     if not pinned:
         add("- **没有 pin 任何仓库** → 侧栏显示的是 GitHub 自动挑的 Popular repositories，"
             "会混入无描述仓库并渲染成空白卡")
-        target.append("手动 pin 3-6 个仓库（网页 Customize your pins，无 API）")
+        target.append("按展示目的手动 pin 1-6 个合适仓库；没有合适内容时不凑数（网页 Customize your pins）")
     else:
         add(f"- 共 {len(pinned)} 个（上限 6）")
         for p in pinned:
@@ -396,14 +396,13 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
             if not p["desc"]:
                 target.append(f"给 `{p['repo']}` 补仓库描述（否则 pin 卡是空白的）")
             if p.get("fork"):
-                add("    ⚠️ 这是 fork：pin 卡会印上「Forked from …」且 star 计 0 —— "
-                    "等于把最强的信号自己抹掉了")
+                add("    这是 fork：会标注 Forked from，显示 fork 本身而非上游的 star 数。"
+                    "有自己的实际改动时可以保留，但应说明来源与贡献范围。")
                 target.append(
-                    f"取消 pin `{p['repo']}`（fork）。官方规则：**拥有**或**近一年内有贡献**"
-                    "的公开仓库都能 pin → 直接 pin 上游本体（对 fork 的提交不算贡献，"
-                    "但已合入上游的 PR 算）")
+                    f"确认 `{p['repo']}` 是要展示自己的改动还是上游贡献，再决定置顶 fork 或上游；"
+                    "不要用上游 star 数替代 fork 的实际数据。")
         if len(pinned) < 3:
-            add("- ⚠️ 少于 3 个，侧栏会显得内容单薄")
+            add("- 少于 3 个也可以，内容相关性比填满数量更重要")
     add("")
 
     # 层 3
@@ -432,8 +431,8 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
             add("- 外链域名：" + "、".join(f"`{h}`" for h in rm["external_hosts"]))
             for h in rm["external_hosts"]:
                 if h in KNOWN_HOSTS and "死" in KNOWN_HOSTS[h]:
-                    add(f"  ❌ `{h}` 实测 {KNOWN_HOSTS[h]}，主页上是裂图")
-                    must.append(f"移除死掉的挂件 {h}，改自产 SVG")
+                    add(f"  历史记录：`{h}` 曾出现 {KNOWN_HOSTS[h]}。是否仍失败以本次图片检查为准，"
+                        "不根据旧记录直接删除。")
 
         if rm["anti_patterns"]:
             add("\n**反模式命中**：")

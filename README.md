@@ -27,7 +27,23 @@ Cursor / Windsurf 等把 `SKILL.md` 当规则文件读也可以，脚本照跑�
 
 | Skill | 做什么 | 依赖 |
 |---|---|---|
-| [`github-profile-polish`](./github-profile-polish) | 把 GitHub 个人主页做成「打开 10 秒就有判断」的对外凭证。六层审计 → 四套主题预设 → 自产亮暗双版 SVG → Actions 每日刷新 | Python 3.10+（仅标准库） |
+| [`github-profile-polish`](./github-profile-polish) | 任何个人账号都能用：四种风格预览 → 个人配置 → 离线作品展示或真实公开 PR 卡片 → 本地检查 → 可选每日刷新 | Python 3.10+（仅标准库） |
+
+## 先体验 GitHub 主页美化
+
+从仓库根目录运行，不需要 token，也不用先上传 GitHub：
+
+```bash
+python github-profile-polish/scripts/build_profile.py --gallery ./style-preview
+python github-profile-polish/scripts/build_profile.py --init ./profile.json --username YOUR_USERNAME
+python github-profile-polish/scripts/build_profile.py --config ./profile.json --mode projects --out ./my-profile
+```
+
+第一条生成四种布局的亮暗对比页；第二条中的 `YOUR_USERNAME` 换成自己的账号。在第三条运行前，填写配置中的名字、介绍、真实作品和链接。然后打开 `my-profile/preview.html`。
+
+风格为 `t1` 编辑排版、`t2` 终端、`t3` 卡片、`t4` 纯 Markdown；支持中文/英文标题与四种独立强调色。没有 PR 或高星仓库也能使用。需要真实公开贡献时选择 `--mode auto`，需要每日刷新时再加 `--automation`。
+
+生成器默认保护已有文件，不自动上传或改账号设置。详细使用方法见 [`SKILL.md`](./github-profile-polish/SKILL.md) 和 [首次使用说明](./github-profile-polish/references/first-run.md)。分发单个 skill 目录时请同时保留本仓库的 `LICENSE`。
 
 ## 每个 skill 里有什么
 

@@ -1,236 +1,116 @@
 ---
 name: github-profile-polish
-description: 把 GitHub 主页做成「打开 10 秒就知道你做过什么」的对外凭证。主线是**贡献可视化**：用自产 SVG 把「已合并 PR 数 + 上游仓库官方 logo + star 数」做成一张贡献卡，上面压一句身份定性，下面接可复核的证据链。附带头像/bio/pinned 另外五层、四套主题预设、GitHub 渲染硬规则、Actions 每日自动刷新。触发词：GitHub 主页、profile README、贡献展示、PR 卡片、主页美化、主页重做、给面试官看的主页、开源贡献怎么展示。
-agent_created: true
+description: 为 GitHub 个人账号审计、设计和生成主页 README，提供四种风格、亮暗双版、本地预览、真实公开贡献展示与可选每日刷新。适用于新手、求职者、维护者和作品集作者。触发词：GitHub 主页、profile README、主页美化、主页重做、贡献展示、PR 卡片、开源贡献怎么展示。具体项目仓库的 README 装修和组织主页不在本 skill 范围内。
+metadata:
+  agent_created: "true"
 ---
 
-# GitHub 主页：把贡献做成看得见的东西
+# GitHub 个人主页
 
-## 交付物是什么
+把用户自己的介绍、作品与真实贡献整理成可直接使用的主页。**没有 PR、没有高星仓库，也能完成主页。**风格由用户选择；受众和内容只是建议依据，不替用户决定审美。
 
-一句话：**上面一层「我是谁」，下面一层「我做过什么，你能去 GitHub 查」。**
+## 先确定什么
 
-| 产物 | 作用 | 生成方式 |
-|---|---|---|
-| `assets/hero-{light,dark}.svg` | 身份层：名字 + 一句定位 + 身份标签 | `scaffold.py` |
-| `assets/contrib-{light,dark}.svg` | **证据层**：焦点数字（已合并 PR 总数）+ 逐仓库的官方 logo / ★star / PR 数 | `generate_contrib.py` |
-| `README.md` | 把两张图串起来 + 代表项目 | `scaffold.py` 出骨架，脚本回写标记区间 |
+- 目标账号：GitHub 用户名，不是邮箱或网址。组织账号走 `<org>/.github/profile/README.md`，不要套个人流程。
+- 内容：显示名、希望别人知道的一句话、已有作品或联系链接。用户已给过的信息不要重复问；缺少非必要项就省略，不能编造履历、成果或项目。
+- 风格：有偏好就沿用；没有偏好先给四种预设的预览。用户只想快速完成时默认 `t1 + blue`，不为选择风格反复打断。
+- 修改范围：新建同名仓库还是修改已有主页？先看准确工作目录与 Git 状态。发布、覆盖现有 README、修改账号设置是不同操作，不能从“美化”推定全部授权。
 
-**为什么证据层比身份层重要**：面试官/招聘方看主页只做一件事——验证简历上的话。
-一句「熟悉 Agent 开发」不值钱，「给 `langgenius/dify`（★160k）合并了 19 个 PR，点开就能看」值钱。
-所以贡献卡是默认要做的，hero 是配菜。
+用户只需说“用这个 skill 美化我的 GitHub 主页，用户名是……，偏好……”，不必自己知道脚本怎么拼装。助手负责把已确认内容写成配置、运行工具和展示结果。
 
-## 适用范围（先判断，别硬套）
+## 四种可直接运行的风格
 
-| 用户是谁 | 主页定位 | 该怎么做 |
-|---|---|---|
-| **求职者 / 学生** | 主要可控面，必须做到位 | 全套：bio、pinned、hero、**贡献卡**、自动化 |
-| **开源维护者 / 已有强仓库** | 锦上添花，**过度装饰是负分** | 只修客观错误（裂图、空白 pin 卡、错数字），不重做视觉 |
-| **设计师 / 写作者等非代码岗** | 作品集为主，GitHub 是辅证 | 只要 hero + 一段文字，贡献卡按需 |
-| **组织账号（Organization）** | —— | **不适用**。`audit_profile.py` 会直接拒绝，组织的 README 走 `<org>/.github/profile/README.md` |
-
-判据由 `audit_profile.py` 自动分档（★≥500 → 强信号），别拍脑袋。
-**星数取不到时它给「未能判定」而不是硬判成弱**——那是真实状态，不是缺陷。
-
-## 铁律：表述强度 ≤ 证据强度
-
-所有数字必须能从公开 API 复算，不能写「熟悉 X」而仓库里没有 X。
-贡献卡每个数字都能在 `https://github.com/search?q=author:<user>+is:pr+is:merged` 点出来，
-卡片底部也印了这句话。违反一次，整张卡就变成装饰品。
-
-## 三条核心判断
-
-**① 一屏一个视觉焦点。** 用户原话：「一点都不高级，搞得很复杂，面试官抓不住重点」。
-一张图只允许一个焦点数字或一句定性 → 一条支撑证据链 → 结束。
-hero 的焦点是名字，贡献卡的焦点是 **PR 总数**，两图不争。
-
-**② 不依赖第三方实时服务。** 见 `references/widget-liveness.md`：
-`github-readme-stats` 已 503 + 官方弃维护、`profile-trophy` 402、`metrics.lecoq.io` 500。
-**唯一稳的路线 = 自己生成 SVG 提交进仓库**，GitHub Actions 每日刷新。
-
-**③ 深浅双版用 `<picture>`，不用 SVG 内 CSS。**
-`<img>` 里的 `@media (prefers-color-scheme:dark)` 按**操作系统**判断，
-且 WebKit（Safari / GitHub iOS App）不生效（WebKit bug 199134）。
-GitHub 会把 `<picture>` 包成 `<themed-picture>`，跟随**站点主题**。
-
-## 官方 logo 怎么进 SVG（这条决定贡献卡长什么样）
-
-GitHub 给 raw SVG 的响应头是：
-
-```
-Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; sandbox
-```
-
-2026-11 用同款响应头在本地 1:1 复现实测（`<img>` 加载、截图数像素）：
-
-| 嵌法 | 结果 |
-|---|---|
-| `<image href="data:image/png;base64,…">` | ✅ **显示**（64×64 → 4096 红色像素，完全吻合） |
-| `<image href="https://…">` 外链 | ❌ 全拦（0 像素） |
-| 内联 `<circle>` / `<rect>` 矢量 | ✅ 显示（对照组） |
-
-**结论：官方 logo 只能 base64 内嵌。** 一张 64px 头像约 3KB，base64 后 4KB，
-6 个仓库的卡约 25KB——完全可接受，换来「单文件自包含、不依赖 camo、不会某天开天窗」。
-
-### logo 从哪来（默认就是官方头像）
-
-```
---logo owner=path      临时指定（极少用）
-logos/<owner>.svg|png  你自己想覆盖的组织
-GitHub 官方头像        默认走这条，owner.avatar_url?s=64
-首字母方块             兜底，并提示你补文件
-```
-
-**刻意不内置任何品牌图标库。** 内置 25 个图标要 98KB，而且上游换 logo 就过期、
-还牵扯商标归属；而 owner 头像本身就是官方标识，实时拉永远是最新的，一张才 3KB。
-矢量更清晰这点收益，不值得让整个 skill 变重。
-
-真要覆盖某个组织，把文件丢进 `logos/` 或用 `--logo`，细节见 `logos/README.md`。
-缺 logo 时脚本会把「放哪个路径 / 用什么参数」直接打印出来，不会静默留空。
-
-## 六层，README 只是第三层
-
-改 README 之前先看这六层，改错层性价比极低：
-
-| # | 层 | 控制方式 | 60 秒内被看到 | 成本 |
-|---|---|---|---|---|
-| 1 | 头像 | 设置 → Public profile | 100% | 10 分钟 |
-| 2 | 名字 + bio（160 字符） | 同上 | 100% | 5 分钟 |
-| 3 | **Profile README（含贡献卡）** | `<user>/<user>` 仓库 | 90% | 小时级 |
-| 4 | Pinned repositories（6 个上限） | 网页 Customize pins（**无 API**） | 80% | 20 分钟 |
-| 5 | 社交链接（4 个上限） | 设置 → Social accounts | 60% | 5 分钟 |
-| 6 | 贡献图 | 只能靠真实提交 | 50% | 不可伪造 |
-
-**先做 1/2/4，再动 README。** 详情见 `references/content-model.md`。
-
-## 四套主题预设
-
-默认 **T1 编辑排版风**。选型看用户身份，不看他喜欢什么：
-
-| 预设 | 一句话 | 适合 | 一票否决 |
+| 参数 | 风格 | 视觉差异 | 常见用途 |
 |---|---|---|---|
-| **T1 Editorial** | 透明背景、无卡片、发丝线、mono 眉行 + 大标题、单一强调色 | 想显克制/成熟，多数技术岗 | 再叠图标墙 = 自相矛盾 |
-| **T2 Terminal** | 全等宽、提示符、光标、终端窗口装饰 | 后端 / 系统 / Agent / CLI | 中文标题别用等宽（字宽不齐） |
-| **T3 Card** | 圆角 + 1px 边框 + bg.inset 底，最多 2 张 | 信息量大 | 超过 2 张就变仪表盘 |
-| **T4 Minimal** | 零 SVG，纯 Markdown 排版 | 不想维护 | 内容不足以填满一屏时别用 |
+| `t1` | Editorial / 编辑排版 | 透明背景、名字为焦点、细线与留白 | 通用个人介绍、求职 |
+| `t2` | Terminal / 终端 | 窗口标题栏、提示符、静态光标；贡献图也采用终端框架 | 喜欢 CLI、后端或系统风格 |
+| `t3` | Card / 卡片 | 克制的边框和底色；身份与贡献分区 | 喜欢明确的信息分组 |
+| `t4` | Minimal / 极简 | 完全使用 Markdown；贡献也以文本列表展示，不生成 SVG | 零图片依赖、低维护、文字优先 |
 
-完整规格见 `references/design-system.md`；强调色是独立参数：`purple|blue|green|orange`，取值一律 Primer token。
+强调色独立选择 `blue / purple / green / orange`；内容语言支持 `zh / en`。预设不绑定职业，也不因用户的 star 数拒绝重做。
 
----
-
-## 流程
-
-> 脚本都在 `scripts/` 下，用绝对路径调用，不要假设 cwd。
-
-### S1 审计（先跑脚本，别靠眼看）
 ```bash
-python scripts/audit_profile.py <username>
+python scripts/build_profile.py --gallery ./style-preview
 ```
-输出六层实际状态 + 外链图片存活 + 反模式命中 + 按信号强度分档的待修清单。
-**这一步决定后面改什么**，跳过就会美化了不该改的层。
-组织账号会被拒绝并给出正确入口；星数取不到时标「未能判定」，不会硬判成弱。
 
-### S2 定主题 + 定口径
-一次问完两件事：
-- 给谁看（面试官 / 开源同行 / 自己）→ 决定 T1–T4
-- 只算「已合并 PR」还是也含 open → 未验证的声明会稀释可信度，
-  但要主动提示代价：知名仓库往往还在待审，过滤后品牌信号会消失
+打开输出的 `index.html` 比较亮暗双版；也可以加 `--config ./profile.json`，用用户自己的名字比较。图库不联网、不填入虚构贡献数字。详细排版规则按需读 [design-system.md](references/design-system.md)。
 
-### S3 身份层：出 hero 骨架
+## 可复现的首次使用路径
+
+以下命令从本 skill 目录运行。助手从其他目录执行时，使用实际 skill 的绝对路径，不能硬编码作者机器的路径。只有 Python 3.10+ 是必要依赖。
+
 ```bash
-python scripts/scaffold.py --theme t1 --name "张三" --latin "San Zhang" \
-  --eyebrow "AGENT DEVELOPER" --tagline "一句话说清你在做什么。" \
-  --sub "身份 · 专注方向" --out ./profile
+python scripts/build_profile.py --init ./profile.json --username YOUR_USERNAME
+python scripts/build_profile.py --config ./profile.json --mode projects --out ./profile
+python scripts/verify_render.py --local ./profile
 ```
-`t4` 不出 SVG。换强调色加 `--accent purple|blue|green|orange`。
-名字过长会自动缩字号、再不行截断——**不会让字被画布裁掉**。
 
-### S4 证据层：出贡献卡（这一步是重点）
+把 `YOUR_USERNAME` 换成用户账号；在第二步前填写真实的显示名、定位、作品和联系链接。配置结构、Windows 用法与故障处理见 [first-run.md](references/first-run.md)。也可直接用 `--username / --name / --tagline / --theme` 生成，无需配置文件。
+
+`projects` 路径完全离线。生成后打开 `preview.html` 检查亮暗效果；它是本地近似预览，**不是 GitHub 已发布的证明**。
+
+## 根据内容选择模式
+
+| 模式 | 行为 |
+|---|---|
+| `projects` | 不联网，使用已确认的介绍、作品和链接；无需任何 PR 或 token |
+| `auto` | 获取真实公开已合并 PR；数量为零时自动省略贡献卡，保留介绍与作品 |
+| `contributions` | 明确以已合并 PR 为主；没有可展示 PR 时停止并建议改用其他模式 |
+
 ```bash
-python scripts/generate_contrib.py <username> --out ./profile --top 4
+python scripts/build_profile.py --config ./profile.json --mode auto --out ./profile-live
 ```
-- 拉 `search/issues?q=author:<user>+type:pr+is:merged+-user:<user>`（**排除自己的仓库**）
-- 逐仓库用 `repo:` 维度精确查 PR 数——样本里数出来的会差一到两个数量级
-  （实测 antfu 的 vitejs/vite：样本 1，真实 130）
-- 拉 `stargazers_count` + 仓库描述；logo 走 `logos/` 四档解析
-- 输出 `assets/contrib-{light,dark}.svg` + 缓存 `assets/contrib.json`
-- README 里有 `<!-- CONTRIB:BEGIN -->` … `<!-- CONTRIB:END -->` 就自动回写
-- `--offline` 用缓存重渲染（本地出图、CI 联网刷新的标准姿势）
-- `--sort prs|stars`：默认按贡献深度；`--top N` 展示几个仓库
-- `--logo owner=path` 覆盖单个组织的 logo；`--avatar-only` 只用官方头像
 
-**排序口径**：他人仓库 > 自有项目；默认按**每个仓库的已合并 PR 数**降序
-（卡片叙事是「贡献深度」，不是「蹭到了多少大仓库」），star 作为每行的展示信息。
-自己给自己合并的 PR 默认排除，排除数量会在终端明确打印出来。
+认证不是必填项。公开 API 可匿名调用，但有额度限制；有需要时使用环境变量 `GH_TOKEN` / `GITHUB_TOKEN` 或已有的 `gh auth`。**不把 token 写进配置、README、命令示例的真实值或输出日志。**网络失败不能冒充“零贡献”；可先用 `projects`，或在已有匹配缓存时明确使用 `--offline`。
 
-### S5 组装 README
-硬规则：
-- 每张图用 `<picture>` 包，`<img>` 本身不要再裸放
-- 深浅双版 `<source media="(prefers-color-scheme: dark)">`
-- 动态回写区间用标记：`<!-- CONTRIB:BEGIN/END -->`、`<!-- STATS:BEGIN/END -->`
-- 排序按**含金量不按时间**
+贡献统计必须满足：
+- 只查询 `is:public`，即使 token 能读取私有仓库，也不能把私有贡献发布到主页。
+- 默认排除自有仓库的 PR；显式包含时必须写“包含自有仓库”，不能标成上游贡献。
+- 搜索过滤按账号名下仓库区分，不能自动判定组织所有权；组织项目是否属于第三方上游、个人承担什么角色仍需确认。
+- 逐仓库 PR 数使用精确查询，不拿抽样数量替代。API 返回不完整结果或核实失败时停止，保留原输出。
+- 候选仓库未抓全时，只说“展示若干已核实仓库”，不能声称是全局排名。
+- 缓存必须匹配用户名、公开范围和统计口径。旧缓存缺少这些字段时重新联网生成，不能静默迁移成可信证据。
+- 仓库 star 反映该仓库的关注度，不证明用户能力。作品说明与个人贡献范围仍需用户确认。
 
-### S6 验证（交付前必做）
+## 修改已有主页
+
+先只读运行 `scripts/audit_profile.py USERNAME`；只改用户希望改的层。已有强作品不意味着必须保持原视觉，初学者也不需要凑满六个置顶仓库。
+
+生成器默认拒绝覆盖。先生成到新目录供用户看，再列出确切覆盖文件；确认后才用 `--overwrite`。这个参数会重建同名生成文件，**不是合并用户手写 README 的保证**，其他文件保持不动。不同账号使用不同输出目录。
+
+日常贡献刷新只替换一组 `CONTRIB:BEGIN / END` 标记内的内容，保留用户在标记外添加的文案。标记重复或顺序错误时停止，不尝试猜测。
+
+头像、bio、置顶和社交链接的内容建议按需读 [content-model.md](references/content-model.md)。账号设置不由本地生成器自动修改；置顶通常需要用户在网页操作。
+
+## 可选自动刷新
+
 ```bash
-python scripts/verify_render.py <username>
+python scripts/build_profile.py --config ./profile.json --mode auto --automation --out ./profile-live
 ```
-跑的是**线上页面**：`<picture>` 双版是否配齐、亮暗两套图是否各自 200 且 `content-type: image/*`、
-SVG 内有没有会被 GitHub 掐掉的东西（`<script>`、远程字体、**外链图片**——logo 必须是 data URI）、
-是否缺 `<title>` / `viewBox`。
 
-截图肉眼看（三平台都行，找到 chrome/chromium 即可）：
-```bash
-# Windows: C:/Program Files/Google/Chrome/Application/chrome.exe
-# macOS:   /Applications/Google\ Chrome.app/Contents/MacOS/Google\ Chrome
-# Linux:   google-chrome 或 chromium
-<chrome> --headless --disable-gpu --screenshot=out.png \
-  --window-size=806,400 "file:///<预览页绝对路径>"
-```
-**必须按 806 宽渲染**（962 原生宽看不出真实观感）；中文路径会让 headless 写文件失败，输出图放 `/tmp` 或 `%TEMP%`。
+额外产出 `.github/workflows/update-stats.yml` 和其所需的三个独立脚本。发布到 `USERNAME/USERNAME` 后，由 GitHub Actions 每日刷新，也可手动触发；无需访问原 skill 安装目录。网络或数据检查失败则任务失败，不提交伪造或部分统计；内容不变时不追加提交。
 
-### S7 自动化
-`.github/workflows/update-stats.yml`：`schedule` 每日 + `workflow_dispatch` +
-`paths: scripts/**` 的 push 触发；`permissions: contents: write`；提交带 `[skip ci]`。
-GitHub 的 schedule 实际会晚 15–45 分钟，要立刻看到效果就
-`gh workflow run update-stats.yml --repo <user>/<user>`。
+自动化是可选项，不给纯作品模式强加后台任务。不能默认加入 snake、打字动画或第三方实时统计卡；用户明确需要时，说明维护与自动化提交的代价。第三方服务状态需实时验证，[widget-liveness.md](references/widget-liveness.md) 的日期记录不是永久结论。
 
----
+## 验证和发布
 
-## 反面清单（会被判定为业余）
+1. 本地：`scripts/verify_render.py --local DIRECTORY` 检查 README、亮暗配对、本地文件和 SVG 合规。`t4` 必须无图片。
+2. 视觉：打开 `preview.html`，检查桌面与窄屏上的长名字、中英文、颜色与排版。字宽估算不保证真机准确。
+3. 发布：展示目标仓库、可见性和 diff，取得用户授权后再建仓、push 或改账号设置。个人主页要使用公开的同名仓库，不改其他项目的 README。
+4. 线上：发布后运行 `scripts/verify_render.py USERNAME` 并查看 GitHub 实际页面。404、主题不一致或图片格式错误仍属于未完成。
 
-- 打字动画、访客计数器、旋转 logo、徽章墙（>6 个徽章就是纹理不是信息）
-- 「正在学习」清单超过 3 项 —— 三个月后就是谎话，没人回来删
-- 2 张以上重复统计卡片堆叠
-- 空描述仓库被 pin（GitHub 渲染成空白卡）
-- 用低信号提交刷贡献图（`docs: fix typo` 连刷）—— 招聘方看得懂
-- README 写「Hi there 👋」模板 / emoji 轰炸
-- 只有机制没结果：「使用了 React」；应该是「React + 30 个组件，首屏 1.2s」
-- **贡献卡里混入自有项目的 PR 却标「上游合并」**（口径造假，比难看严重）
+GitHub 图片和 HTML 限制按需读 [github-rendering.md](references/github-rendering.md)。仓库内引用 SVG，亮暗选择用 `<picture>`，logo 内嵌为 data URI；不要在 README 内联 SVG 或在 SVG 中引用远程图片。
 
-判断标准：**把仓库名/用户名遮住，这张卡片还能原样贴到别人主页上吗？**
-能 → 重做，它没承载任何个人信息。
+交付时说清：选择了什么风格、生成/覆盖了哪些文件、哪些数据来自 API、是否只使用缓存、哪些检查实际通过、是否已发布、还有哪些账号设置需用户操作。不能把本地结构检查说成线上验收。
 
-## GitHub 渲染硬规则速查
+## 脚本职责
 
-完整白名单/剥离清单见 `references/github-rendering.md`。最容易踩的五条：
-1. README 内联 `<svg>` 会被剥离 → 必须存成文件用 `<img src="./x.svg">` 引用
-2. 裸 `<img>` 用 `<p>` 包住；`<picture>` 是块级容器，顶层放即可，**不必**再包
-3. `<img>` 加载的 SVG **不能引用任何外部资源**（字体、图片、CSS）——CSP `default-src 'none'`；
-   **图片只能 base64 内嵌**（2026-11 实测，见上文）
-4. 外链图片走 `camo.githubusercontent.com` 代理；仓库内相对路径**绕过 camo**
-5. 卡片按 962 宽设计 → GitHub 内容列约 806，等比缩到 0.84。
-   **实际观感 = 设计字号 × 0.84**（实测 44→37、15.5→13、13→11）。
-   推荐 大标题 44–52 / 正文 15.5–18 / 脚注 ≥13
+| 脚本 | 用途 |
+|---|---|
+| `build_profile.py` | 首次配置、完整生成、风格图库、近似预览、可选工作流；推荐入口 |
+| `scaffold.py` | 单独生成身份层与基础 README，默认保护已有文件 |
+| `generate_contrib.py` | 获取或重渲染真实公开贡献；只更新标记区，支持四种风格 |
+| `audit_profile.py` | 只读审计现有线上账号和主页 |
+| `verify_render.py` | 发布前离线结构检查、发布后线上资源检查；不替代视觉检查 |
 
-## 参照实现
-
-`shi-felix/shi-felix` 是 T1 + 贡献卡的完整活样本：hero + 贡献卡 + snake + 每日 Actions。
-改版时先读它，不要从零想。
-
-## 多语种与跨平台（别人的机器上也得对）
-
-- 字宽模型按 Unicode 分档：汉字/假名/谚文/全角 1.0em、emoji 1.15、拉丁五档、
-  西里尔/阿拉伯/泰文 0.60em。**CJK 是 0 误差，其余语种 ±5–7%**
-- 因此 `fit_headline` 留了 **4% 安全余量**，任何估算误差都不会让字被裁掉
-- 字体栈 macOS 走 SF Pro、Windows 走 Segoe UI，同一串字实际宽度不同 →
-  贴边元素（如 T2 光标）算完还会按画布钳一次，不会飞出画布
+维护本 skill 时，运行所有脚本的 `--help`、四种离线风格与本地检查；覆盖保护、零贡献、错误用户名/配置、失效缓存与联网失败都要验证。不要只用“可编译”证明工作流可用。

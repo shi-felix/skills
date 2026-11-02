@@ -18,7 +18,7 @@ logo 来源：**默认就是仓库自己的 owner 官方头像**，不内置任�
     python generate_contrib.py shi-felix --out ./profile
     python generate_contrib.py shi-felix --out ./profile --top 5 --accent blue
     python generate_contrib.py shi-felix --out ./profile --offline   # 用缓存重渲染
-    python generate_contrib.py shi-felix --json contrib.json          # 只导出数据
+    python generate_contrib.py shi-felix --json contrib.json          # 同时导出数据
 
 只依赖标准库。token 优先取 --token，其次 GITHUB_TOKEN / GH_TOKEN，再次 `gh auth token`。
 没有 token 时 search API 限流 10 次/分钟，仓库接口 60 次/小时——够跑一次，但别狂刷。
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import datetime
 import json
 import os
 import re
@@ -36,6 +37,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import xml.etree.ElementTree as ElementTree
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,7 +100,7 @@ def resolve_logo(owner: str, overrides: dict, repo: dict | None = None,
         if avatar:
             sep = "&" if "?" in avatar else "?"
             st, body, hdrs = f.raw(f"{avatar}{sep}s=64", retries=2, timeout=15)
-            ctype = hdrs.get("Content-Type", "")
+            ctype = next((value for header, value in hdrs.items() if header.lower() == "content-type"), "")
             if st == 200 and ctype.startswith("image/") and len(body) < 200_000:
                 return ({"kind": "raster", "b64": base64.b64encode(body).decode(),
                          "mime": ctype.split(";")[0]}, "avatar")
@@ -114,7 +116,15 @@ def logo_href(logo: dict | None, C: dict) -> str:
     if not logo:
         return ""
     if logo.get("kind") == "svg":
-        svg = re.sub(r"<svg\b", f'<svg fill="{C["text"]}"', logo["svg"], count=1)
+        from verify_render import svg_findings
+
+        findings = svg_findings(logo["svg"], depth=1)
+        if findings:
+            raise ValueError("自定义 logo 不是安全的独立 SVG：" + "; ".join(findings))
+        root = ElementTree.fromstring(logo["svg"])
+        if "fill" not in root.attrib:
+            root.set("fill", C["text"])
+        svg = ElementTree.tostring(root, encoding="unicode")
         return "data:image/svg+xml;base64," + base64.b64encode(
             svg.encode("utf-8")).decode()
     return f'data:{logo["mime"]};base64,{logo["b64"]}'
@@ -133,7 +143,8 @@ class Fetcher:
             req.add_header("User-Agent", UA)
             if accept:
                 req.add_header("Accept", accept)
-            if self.token and url.startswith(API):
+            destination = urllib.parse.urlsplit(url)
+            if self.token and destination.scheme == "https" and destination.hostname == "api.github.com":
                 req.add_header("Authorization", f"Bearer {self.token}")
             try:
                 with self.opener.open(req, timeout=timeout) as r:
@@ -186,7 +197,7 @@ def collect_merged(f: Fetcher, user: str, max_pages: int = 3,
     默认排除 `user:<自己>`：自己给自己合并的 PR 不是「上游贡献」，
     混进来会让卡片的口径站不住（见 references/content-model.md）。
     """
-    q = f"author:{user} type:pr is:merged"
+    q = f"author:{user} type:pr is:merged is:public"
     if not include_self:
         q += f" -user:{user}"
     counts: dict[str, int] = {}
@@ -203,6 +214,8 @@ def collect_merged(f: Fetcher, user: str, max_pages: int = 3,
                 raise RuntimeError("search API 被限流（403）。等一分钟，或配 GITHUB_TOKEN，"
                                    "或直接用 --offline 读缓存")
             raise RuntimeError(f"search API 返回 {st}")
+        if data.get("incomplete_results"):
+            raise RuntimeError("GitHub 返回了不完整的搜索结果，请稍后重试；不把部分结果当成真实总数")
         total = data.get("total_count", total)
         for it in data.get("items", []):
             repo_url = (it.get("repository_url") or "")
@@ -226,7 +239,7 @@ def collect_merged(f: Fetcher, user: str, max_pages: int = 3,
 def search_total(f: Fetcher, q: str) -> int:
     """跑一条 search 查询，只取 total_count；失败返回 -1。"""
     data, st = f.json(f"{API}/search/issues?q={urllib.parse.quote(q)}&per_page=1")
-    if isinstance(data, dict) and "total_count" in data:
+    if isinstance(data, dict) and "total_count" in data and not data.get("incomplete_results"):
         return int(data["total_count"])
     return -1
 
@@ -237,7 +250,7 @@ def exact_pr_count(f: Fetcher, user: str, repo: str) -> int:
     卡片上的每个数字都必须走这里：样本计数在大账号上会差一到两个数量级
     （实测 antfu 的 vitejs/vite：样本数 1，真实 130）。
     """
-    return search_total(f, f"author:{user} type:pr is:merged repo:{repo}")
+    return search_total(f, f"author:{user} type:pr is:merged is:public repo:{repo}")
 
 
 def collect_repos(f: Fetcher, names: list[str], overrides: dict,
@@ -250,6 +263,8 @@ def collect_repos(f: Fetcher, names: list[str], overrides: dict,
             out.append({"repo": name, "stars": -1, "desc": "", "owner": name.split("/")[0],
                         "logo": None, "logo_src": "none"})
             continue
+        if data.get("private"):
+            raise RuntimeError("GitHub 返回了非公开仓库，已停止生成，避免泄露私有贡献")
         owner_login = ((data.get("owner") or {}).get("login")
                        or name.split("/")[0])
         logo, src = resolve_logo(owner_login, overrides, data,
@@ -265,10 +280,74 @@ def collect_repos(f: Fetcher, names: list[str], overrides: dict,
     return out
 
 
+def collect_data(fetcher: Fetcher, user: str, *, max_pages: int = 3,
+                 probe: int = 8, include_self: bool = False,
+                 overrides: dict | None = None, avatar_only: bool = False,
+                 sort: str = "prs") -> dict:
+    account, status = fetcher.json(f"/users/{user}")
+    if not isinstance(account, dict):
+        raise RuntimeError(f"无法读取 GitHub 用户 {user}（状态 {status}），请检查用户名、网络或认证")
+    if account.get("type") != "User":
+        raise ValueError("此工具面向 GitHub 个人主页，不支持组织账号")
+    counts, total, last, fetched = collect_merged(fetcher, user, max_pages, include_self)
+    if total and not counts:
+        raise RuntimeError("搜索返回了非零总数但没有可核实的仓库，未生成贡献统计")
+    candidates = sorted(counts, key=lambda name: counts[name], reverse=True)[:probe]
+    repos = collect_repos(fetcher, candidates, overrides or {}, allow_local=not avatar_only)
+    for repo, name in zip(repos, candidates):
+        exact = exact_pr_count(fetcher, user, name)
+        if exact < 0:
+            raise RuntimeError(f"无法核实 {name} 的 PR 数；未使用抽样数量替代，原缓存保持不变")
+        repo["prs"] = exact
+        repo["prs_exact"] = True
+    sort_key = (lambda repo: (repo["prs"], repo["stars"])) if sort == "prs" else (
+        lambda repo: (repo["stars"], repo["prs"]))
+    repos.sort(key=sort_key, reverse=True)
+    query = f"author:{user} type:pr is:merged is:public" + ("" if include_self else f" -user:{user}")
+    return {
+        "user": user, "scope": "all" if include_self else "upstream", "visibility": "public", "query": query,
+        "total_merged": total, "last_merged": last, "complete": fetched >= total,
+        "repo_count": len(counts), "repos": repos,
+        "generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+    }
+
+
+def validate_data(data: dict, user: str, include_self: bool = False) -> dict:
+    if not isinstance(data, dict) or str(data.get("user", "")).lower() != user.lower():
+        raise ValueError("缓存用户名与当前用户不一致，不能复用他人的贡献数据")
+    scope = "all" if include_self else "upstream"
+    if data.get("scope") != scope:
+        raise ValueError("缓存缺少统计口径或与当前口径不一致，请重新联网生成缓存")
+    if data.get("visibility") != "public" or "is:public" not in str(data.get("query", "")):
+        raise ValueError("缓存未限定公开贡献，请重新联网生成，不能将私有统计发布到主页")
+    if type(data.get("total_merged")) is not int or data["total_merged"] < 0:
+        raise ValueError("缓存中的 PR 总数无效")
+    if not isinstance(data.get("repos"), list):
+        raise ValueError("缓存中的 repos 必须是列表")
+    if bool(data["total_merged"]) != bool(data["repos"]):
+        raise ValueError("缓存总数与仓库列表不一致")
+    seen = set()
+    for repo in data["repos"]:
+        if not isinstance(repo, dict) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", str(repo.get("repo", ""))):
+            raise ValueError("缓存中的仓库名无效")
+        if repo["repo"].lower() in seen:
+            raise ValueError("缓存中出现重复仓库")
+        seen.add(repo["repo"].lower())
+        if type(repo.get("prs")) is not int or repo["prs"] <= 0 or repo.get("prs_exact") is not True:
+            raise ValueError("缓存含未核实的 PR 数，请重新联网生成")
+        if type(repo.get("stars")) is not int or repo["stars"] < -1:
+            raise ValueError("缓存中的 star 数无效")
+        if not isinstance(repo.get("desc", ""), str):
+            raise ValueError("缓存中的仓库描述无效")
+    if sum(repo["prs"] for repo in data["repos"]) > data["total_merged"]:
+        raise ValueError("各仓库 PR 数超过总数，请重新获取一致的数据快照")
+    return data
+
+
 # ---------------------------------------------------------------- 版式
 def fmt_stars(n: int) -> str:
     if n < 0:
-        return "★ ?"
+        return "?"
     if n < 1000:
         return str(n)
     if n < 100_000:
@@ -278,32 +357,48 @@ def fmt_stars(n: int) -> str:
 
 
 def render(rows: list[dict], total: int, last: str, C: dict, accent: str,
-           complete: bool = True, repo_count: int = 0) -> str:
+           complete: bool = True, repo_count: int = 0, *, theme: str = "t1",
+           include_self: bool = False, language: str = "zh") -> str:
     n = len(rows)
     last_bottom = LIST_TOP + (n - 1) * ROW_H + 34
     line_y = last_bottom + 24
     note_y = line_y + 26
     H = note_y + 16
 
-    p = [S.svg_open(W, H, f"开源贡献 · {total} 个已合并 PR")]
+    offset = 34 if theme == "t2" else 0
+    p = [S.svg_open(W, H + offset, f"{total} merged PRs")]
+    if theme in {"t2", "t3"}:
+        p.append(f'<rect x="16" y="1" width="{W - 32}" height="{H + offset - 2}" rx="8" '
+                 f'fill="{C["canvas"]}" stroke="{C["border"]}"/>')
+    if theme == "t2":
+        p.append(S.tx(MARGIN, 25, "$ github contributions", 13, accent, family=S.MONO))
+        p.append(f'<line x1="16" y1="34" x2="{W - 16}" y2="34" stroke="{C["border"]}"/>')
+        p.append('<g transform="translate(0,34)">')
     # 眉行
     p.append(f'<rect x="{MARGIN}" y="47" width="7" height="7" fill="{accent}"/>')
-    p.append(S.tx(56, 54, "OPEN SOURCE · MERGED PULL REQUESTS", 11.5, accent,
-                  "600", family=S.MONO, ls=2.4))
+    heading = "MERGED PULL REQUESTS" if include_self else "OPEN SOURCE / MERGED PULL REQUESTS"
+    p.append(S.tx(56, 54, heading, 13, accent, "600", family=S.MONO))
     # 焦点数字：唯一的重心
     num = str(total)
-    p.append(S.tx(MARGIN - 4, 152, num, 96, C["text"], "700", ls=-3))
-    nx = MARGIN - 4 + S.text_w(num, 96) - 3 * max(len(num) - 1, 0) + 18
-    p.append(S.tx(nx, 130, "merged PRs", 18.5, C["muted"]))
+    number_size = min(96, W * 0.45 / max(S.text_w(num, 1), 1))
+    number_width = S.text_w(num, number_size)
+    p.append(S.tx(MARGIN - 4, 152, num, number_size, C["text"], "700", max_width=number_width / 0.95))
+    nx = MARGIN - 4 + number_width + 18
+    p.append(S.tx(nx, 130, "merged PRs", 18.5, C["muted"], max_width=W - MARGIN - nx))
     # 副标题只说能被 API 证实的：抓全了才敢报仓库总数，
     # 抓不全（大账号翻不完）就老实说是「展示贡献最深的 N 个」
     if not complete:
-        sub = f"展示贡献最深的 {n} 个上游仓库"
+        sub = f"展示 {n} 个已核实的贡献仓库"
     elif repo_count > n:
-        sub = f"覆盖 {repo_count} 个上游仓库 · 展示前 {n} 个"
+        sub = f"覆盖 {repo_count} 个仓库 · 展示前 {n} 个"
     else:
-        sub = f"覆盖 {repo_count} 个上游仓库"
-    p.append(S.tx(nx, 152, sub + (f" · 最近 {last}" if last else ""), 13, C["muted"]))
+        sub = f"覆盖 {repo_count} 个仓库"
+    if language == "en":
+        sub = f"Showing {n} verified {'repository' if n == 1 else 'repositories'}" if not complete else (
+            f"Across {repo_count} {'repository' if repo_count == 1 else 'repositories'}")
+    if include_self:
+        sub += " / includes own repositories" if language == "en" else " · 包含自有仓库"
+    p.append(S.tx(nx, 152, S.clip(sub, 13, W - MARGIN - nx), 13, C["muted"], max_width=W - MARGIN - nx))
     p.append(f'<line x1="{MARGIN}" y1="182" x2="{W - MARGIN}" y2="182" '
              f'stroke="{C["border"]}" stroke-width="1"/>')
 
@@ -326,9 +421,9 @@ def render(rows: list[dict], total: int, last: str, C: dict, accent: str,
             p.append(S.tx(MARGIN + LOGO / 2, y + 24, r["repo"][:1].upper(), 14,
                           C["muted"], "700", anchor="middle"))
         p.append(S.tx(name_x, y + 14, S.clip(r["repo"], 19, avail, word=False), 19,
-                      C["text"], "700"))
-        desc = r.get("desc") or "（仓库无描述）"
-        p.append(S.tx(name_x, y + 34, S.clip(desc, 13, avail, word=True), 13, C["muted"]))
+                      C["text"], "700", max_width=avail))
+        desc = r.get("desc") or ("No repository description" if language == "en" else "（仓库无描述）")
+        p.append(S.tx(name_x, y + 34, S.clip(desc, 13, avail, word=True), 13, C["muted"], max_width=avail))
         p.append(S.tx(right, y + 14, f'★ {fmt_stars(r["stars"])}', 17, C["muted"],
                       "600", anchor="end"))
         n_pr = r["prs"]
@@ -336,20 +431,78 @@ def render(rows: list[dict], total: int, last: str, C: dict, accent: str,
                       accent, "600", family=S.MONO, anchor="end"))
     p.append(f'<line x1="{MARGIN}" y1="{line_y}" x2="{W - MARGIN}" y2="{line_y}" '
              f'stroke="{C["border"]}" stroke-width="1"/>')
-    p.append(S.tx(MARGIN, note_y,
-                  "数据源 GitHub Search API（is:pr is:merged）· 每个 PR 均可在 GitHub 复核",
-                  13, C["muted"]))
+    note = "GitHub Search API / is:pr is:merged / Each PR is publicly verifiable" if language == "en" else (
+        "数据源 GitHub Search API（is:pr is:merged）· 每个 PR 均可在 GitHub 复核")
+    p.append(S.tx(MARGIN, note_y, note, 13, C["muted"]))
+    if theme == "t2":
+        p.append("</g>")
     p.append("</svg>")
     return "\n".join(p)
 
 
-def snippet() -> str:
+def snippet(data: dict | None = None, *, theme: str = "t1", language: str = "zh", top: int = 4) -> str:
+    if data is not None and data["total_merged"] == 0:
+        return f"{BEGIN}\n{END}"
+    if theme == "t4" and data is not None:
+        label = "已合并 PR" if language == "zh" else "Merged PRs"
+        if data["scope"] == "all":
+            label += "（包含自有仓库）" if language == "zh" else " (including own repositories)"
+        entries = [f"{BEGIN}", f"## {label}", "", f"**{data['total_merged']}**", ""]
+        for repo in data["repos"][:top]:
+            entries.append(f"- [{repo['repo']}](https://github.com/{repo['repo']}) · {repo['prs']} {'PR' if repo['prs'] == 1 else 'PRs'} · ★ {fmt_stars(repo['stars'])}")
+        query = urllib.parse.quote(data["query"])
+        entries.extend(("", f"[GitHub Search](https://github.com/search?q={query}&type=pullrequests)", END))
+        return "\n".join(entries)
     return f"""{BEGIN}
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="./assets/contrib-dark.svg">
-  <img src="./assets/contrib-light.svg" width="100%" alt="开源贡献：已合并 PR 与上游仓库">
+  <img src="./assets/contrib-light.svg" width="100%" alt="Merged pull requests and repositories">
 </picture>
 {END}"""
+
+
+def write_contribution(out: Path, data: dict, *, theme: str = "t1", accent: str = "blue",
+                       top: int = 4, language: str = "zh", update_readme: bool = True) -> None:
+    from verify_render import svg_findings
+
+    include_self = data.get("scope") == "all"
+    validate_data(data, data["user"], include_self)
+    profile_path = out / "profile.json"
+    if profile_path.is_file() and S.read_profile(profile_path)["username"].lower() != data["user"].lower():
+        raise ValueError("贡献账号与该目录的个人配置不一致，请使用另一个输出目录")
+    cache = out / "assets" / "contrib.json"
+    if cache.is_file():
+        try:
+            previous = json.loads(cache.read_text(encoding="utf-8-sig"))
+            meaningful = lambda snapshot: {key: value for key, value in snapshot.items() if key != "generated_at"}
+            if isinstance(previous, dict) and meaningful(previous) == meaningful(data):
+                data["generated_at"] = previous.get("generated_at", data.get("generated_at"))
+        except (OSError, ValueError):
+            pass
+    outputs = {"assets/contrib.json": json.dumps(data, ensure_ascii=False, indent=2) + "\n"}
+    rows = data["repos"][:top]
+    if theme != "t4" and rows:
+        for index, (variant, colors) in enumerate((("light", S.LIGHT), ("dark", S.DARK))):
+            svg = render(rows, data["total_merged"], data.get("last_merged", ""), colors,
+                         S.ACCENTS[accent][index], bool(data.get("complete")), int(data.get("repo_count", len(rows))),
+                         theme=theme, include_self=include_self, language=language)
+            findings = svg_findings(svg)
+            if findings:
+                raise ValueError("贡献图不符合渲染要求：" + "; ".join(findings))
+            outputs[f"assets/contrib-{variant}.svg"] = svg
+    readme = out / "README.md"
+    if update_readme and readme.exists():
+        text = readme.read_text(encoding="utf-8")
+        if text.count(BEGIN) != 1 or text.count(END) != 1 or text.index(BEGIN) > text.index(END):
+            raise ValueError("README 必须有且只有一组顺序正确的 CONTRIB:BEGIN / END 标记")
+        beginning, tail = text.split(BEGIN, 1)
+        _, ending = tail.split(END, 1)
+        outputs["README.md"] = beginning + snippet(data, theme=theme, language=language, top=top) + ending
+    S.ensure_targets(out, list(outputs), overwrite=True)
+    for relative, content in outputs.items():
+        target = out / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- main
@@ -359,13 +512,15 @@ def main() -> int:
     ap.add_argument("user")
     ap.add_argument("--out", default=".")
     ap.add_argument("--top", type=int, default=4, help="展示几个仓库，默认 4")
-    ap.add_argument("--accent", default="purple", choices=list(S.ACCENTS))
+    ap.add_argument("--accent", default="blue", choices=list(S.ACCENTS))
+    ap.add_argument("--theme", default="t1", choices=list(S.THEMES))
+    ap.add_argument("--language", default="zh", choices=list(S.LABELS))
     ap.add_argument("--offline", action="store_true", help="只读 assets/contrib.json 缓存")
     ap.add_argument("--token", default=None)
     ap.add_argument("--json", default=None, help="把结构化数据写到指定文件")
     ap.add_argument("--max-pages", type=int, default=3, help="search 最多翻几页（100/页）")
-    ap.add_argument("--probe", type=int, default=8,
-                    help="精确查询几个候选仓库的 PR 数（每个 1 次 search 调用）")
+    ap.add_argument("--probe", type=int,
+                    help="精确查询候选仓库数，默认 max(8, top)，每个仓库一次 search 调用")
     ap.add_argument("--sort", default="prs", choices=["prs", "stars"],
                     help="列表排序：prs=贡献深度（默认），stars=仓库含金量")
     ap.add_argument("--include-self", action="store_true",
@@ -376,122 +531,53 @@ def main() -> int:
                     help="只用 GitHub 官方头像，忽略 logos/ 里的内置图标")
     ap.add_argument("--no-readme", action="store_true", help="不回写 README 标记区间")
     args = ap.parse_args()
+    if args.probe is None:
+        args.probe = max(8, args.top)
 
-    out = Path(args.out)
-    assets = out / "assets"
-    assets.mkdir(parents=True, exist_ok=True)
-    cache = assets / "contrib.json"
-
-    overrides: dict[str, Path] = {}
-    for item in args.logo:
-        if "=" not in item:
-            print(f"--logo 要写成 OWNER=PATH，收到：{item}", file=sys.stderr)
-            return 2
-        k, v = item.split("=", 1)
-        p = Path(v.strip()).expanduser()
-        if not p.exists():
-            print(f"--logo {k.strip()}={p}：文件不存在，这一条不会生效", file=sys.stderr)
-            continue
-        overrides[k.strip().lower()] = p
-
-    if args.offline:
-        if not cache.exists():
-            print(f"没有缓存：{cache}", file=sys.stderr)
-            return 2
-        data = json.loads(cache.read_text(encoding="utf-8"))
-    else:
-        f = Fetcher(get_token(args.token))
-        try:
-            counts, total, last, fetched = collect_merged(
-                f, args.user, args.max_pages, args.include_self)
-        except RuntimeError as e:
-            print(f"{e}", file=sys.stderr)
-            if cache.exists():
-                print(f"可改用 --offline 读缓存：{cache}", file=sys.stderr)
-            return 2
-
-        # 排除掉多少自有仓库的 PR，要明确说出来，别默默少算
-        self_total = -1
-        if not args.include_self:
-            self_total = search_total(
-                f, f"author:{args.user} type:pr is:merged user:{args.user}")
-
-        if not counts:
-            hint = (f"（另有 {self_total} 个提给自己仓库的 PR 未计入；"
-                    f"要包含它们加 --include-self）" if self_total > 0 else "")
-            print(f"{args.user} 没有提给他人仓库的已合并 PR，跳过贡献卡。{hint}")
-            return 0
-        # 先按样本出现次数挑候选，再逐个精确查——样本计数对大账号会差一到两个数量级
-        candidates = sorted(counts, key=lambda k: counts[k], reverse=True)[:args.probe]
-        repos = collect_repos(f, candidates, overrides,
-                              allow_local=not args.avatar_only)
-        for r, nm in zip(repos, candidates):   # collect_repos 按 candidates 顺序返回
-            exact = exact_pr_count(f, args.user, nm)
-            r["prs"] = exact if exact >= 0 else counts[nm]
-            r["prs_exact"] = exact >= 0
-        key = (lambda r: (r["prs"], r["stars"])) if args.sort == "prs" \
-            else (lambda r: (r["stars"], r["prs"]))
-        repos.sort(key=key, reverse=True)
-        data = {"user": args.user, "total_merged": total, "last_merged": last,
-                "complete": fetched >= total, "repo_count": len(counts),
-                "excluded_self": max(self_total, 0), "repos": repos}
-
+    out = Path(args.out).expanduser()
+    cache = out / "assets" / "contrib.json"
+    try:
+        S.normalize_profile({"username": args.user})
+        if not 1 <= args.top <= 10 or not 1 <= args.max_pages <= 10 or not args.top <= args.probe <= 30:
+            raise ValueError("top 和 max-pages 必须在 1-10 之间；probe 必须不小于 top 且不超过 30")
+        overrides = {}
+        for item in args.logo:
+            if "=" not in item:
+                raise ValueError("--logo 必须写成 OWNER=PATH")
+            owner, filename = item.split("=", 1)
+            logo_path = Path(filename.strip()).expanduser()
+            if not owner.strip() or not logo_path.is_file():
+                raise ValueError("--logo 指定的组织名为空或文件不存在")
+            overrides[owner.strip().lower()] = logo_path
+        if args.offline:
+            data = json.loads(cache.read_text(encoding="utf-8-sig"))
+        else:
+            data = collect_data(Fetcher(get_token(args.token)), args.user, max_pages=args.max_pages,
+                                probe=args.probe, include_self=args.include_self, overrides=overrides,
+                                avatar_only=args.avatar_only, sort=args.sort)
+        validate_data(data, args.user, args.include_self)
+        export = Path(args.json).expanduser() if args.json else None
+        if export:
+            S.ensure_targets(export.parent, [export.name])
+        write_contribution(out, data, theme=args.theme, accent=args.accent, top=args.top,
+                           language=args.language, update_readme=not args.no_readme)
+        if export:
+            export.parent.mkdir(parents=True, exist_ok=True)
+            export.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    except (OSError, ValueError, RuntimeError) as error:
+        print(str(error), file=sys.stderr)
+        print("网络或认证失败时不会伪造数据；已有匹配缓存可使用 --offline。", file=sys.stderr)
+        return 2
     rows = data["repos"][:args.top]
     if not rows:
-        print("缓存里没有仓库数据。")
-        return 0
-
-    light_accent, dark_accent = S.ACCENTS[args.accent]
-    complete = bool(data.get("complete", True))
-    repo_count = int(data.get("repo_count", len(rows)))
-    (assets / "contrib-light.svg").write_text(
-        render(rows, data["total_merged"], data.get("last_merged", ""),
-               S.LIGHT, light_accent, complete, repo_count), encoding="utf-8")
-    (assets / "contrib-dark.svg").write_text(
-        render(rows, data["total_merged"], data.get("last_merged", ""),
-               S.DARK, dark_accent, complete, repo_count), encoding="utf-8")
-    if not args.offline:
-        cache.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
-    if args.json:
-        Path(args.json).write_text(json.dumps(data, ensure_ascii=False, indent=2),
-                                   encoding="utf-8")
-
-    readme = out / "README.md"
-    if not args.no_readme and readme.exists():
-        md = readme.read_text(encoding="utf-8")
-        if BEGIN in md and END in md:
-            md = re.sub(re.escape(BEGIN) + r".*?" + re.escape(END),
-                        snippet(), md, flags=re.S)
-            readme.write_text(md, encoding="utf-8")
-            print(f"已回写 {readme}")
-        else:
-            print(f"README 里没有 {BEGIN} 标记，跳过回写（片段见下）")
-            print(snippet())
+        print("当前统计范围没有已合并 PR，已清空贡献展示区；可以继续展示自己的作品和介绍。")
     else:
-        print(snippet())
-
-    print(f"\n{data['total_merged']} 个已合并 PR · 展示 {len(rows)} 个仓库")
-    marks = {"bundled": "内置", "local": "本地", "override": "指定", "avatar": "头像",
-             "none": "缺"}
-    for r in rows:
-        n_pr = r["prs"]
-        pr_txt = "1 PR" if n_pr == 1 else f"{n_pr} PRs"
-        print(f"  {r['repo']:<34s} {fmt_stars(r['stars']):>7s}  {pr_txt:<8s}"
-              f"logo[{marks.get(r.get('logo_src'), '?')}]")
-    if data.get("excluded_self"):
-        print(f"  （已排除 {data['excluded_self']} 个提给自己仓库的 PR）")
-
-    # 缺 logo 的组织：把「该怎么办」说清楚，别让使用者自己猜
-    missing = [r for r in rows if r.get("logo_src") == "none"]
-    if missing:
-        print(f"\n以下 {len(missing)} 个组织没取到 logo（网络失败且不在内置表里）：")
-        for r in missing:
-            print(f"  {r['owner']}")
-        print(f"  处理方式二选一：")
-        print(f"    ① 把 SVG/PNG 放到 {LOGO_DIR / (missing[0]['owner'] + '.svg')}")
-        print(f"    ② 生成时指定：--logo {missing[0]['owner']}=<你的文件路径>")
-    print(f"\n产物：{assets / 'contrib-light.svg'} / contrib-dark.svg")
-    print("下一步：截图看一眼（SKILL.md S5），再 push 让 Actions 每日刷新")
+        print(f"{data['total_merged']} 个已合并 PR · 展示 {len(rows)} 个已核实仓库")
+        for repo in rows:
+            print(f"  {repo['repo']} · {repo['prs']} PRs · ★ {fmt_stars(repo['stars'])}")
+    if args.no_readme or not (out / "README.md").exists():
+        print(snippet(data, theme=args.theme, language=args.language, top=args.top))
+    print(f"产物目录：{out.resolve()}；发布前请完成本地和线上检查。")
     return 0
 
 

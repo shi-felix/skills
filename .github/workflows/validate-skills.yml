@@ -45,6 +45,15 @@ jobs:
           done
           exit $fail
 
+      - name: 验证主页风格和离线生成
+        run: |
+          python github-profile-polish/scripts/build_profile.py --gallery "$RUNNER_TEMP/profile-styles"
+          for theme in t1 t2 t3 t4; do
+            python github-profile-polish/scripts/verify_render.py --local "$RUNNER_TEMP/profile-styles/$theme"
+          done
+          python github-profile-polish/scripts/build_profile.py --username example-maker --name "演示用户" --mode projects --language en --out "$RUNNER_TEMP/profile-english"
+          python github-profile-polish/scripts/verify_render.py --local "$RUNNER_TEMP/profile-english"
+
       - name: 检查不该提交的文件
         run: |
           bad=$(git ls-files | grep -E '__pycache__|\.pyc$|\.DS_Store|Thumbs\.db' || true)
