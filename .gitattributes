@@ -1,0 +1,6 @@
+# 统一 LF：skill 会被 clone 到各种系统上，CRLF 会让脚本里的字符串匹配失效
+* text=auto eol=lf
+*.py text eol=lf
+*.md text eol=lf
+*.sh text eol=lf
+*.svg text eol=lf
