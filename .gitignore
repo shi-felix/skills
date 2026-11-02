@@ -13,3 +13,6 @@ desktop.ini
 .vscode/
 .idea/
 *.swp
+
+# WorkBuddy/IDE 工作区数据（这个目录会被当工作区打开）
+.workbuddy/
