@@ -26,6 +26,16 @@ from pathlib import Path
 
 UA = "profile-polish-verify/1.0"
 
+
+def harden_stdout() -> None:
+    """Windows 中文环境下输出重定向到管道时编码是 cp936，
+    打印 ✅/❌ 会抛 UnicodeEncodeError 中断验证。降级为替换字符。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
 # SVG 里会被 GitHub 掐掉 / 剥掉的东西
 SVG_FORBIDDEN = [
     (r"<script[\s>]", "含 `<script>` → GitHub 会剥离"),
@@ -72,6 +82,7 @@ def parse_article(html: str) -> str:
 
 
 def main() -> int:
+    harden_stdout()
     ap = argparse.ArgumentParser(description="线上渲染验证")
     ap.add_argument("username")
     ap.add_argument("--direct", action="store_true")

@@ -28,6 +28,16 @@ from pathlib import Path
 UA = "profile-polish-audit/1.0"
 API = "https://api.github.com"
 
+
+def harden_stdout() -> None:
+    """Windows 中文环境下输出重定向到管道时编码是 cp936，
+    打印 ✅/❌ 会抛 UnicodeEncodeError 中断整个审计。降级为替换字符。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
 # ---------------------------------------------------------------- 反面模式清单
 # (正则, 名称, 后果说明)
 ANTI_PATTERNS: list[tuple[str, str, str]] = [
@@ -151,6 +161,23 @@ PINNED_QUERY = {
 }
 
 
+def parse_count(s: str) -> int:
+    """把 `143k` / `1.2k` / `1,204` / `828` 解析成整数；解析不了返回 -1。
+
+    GitHub 的 pin 卡在星数过千后显示的是缩写，直接 int() 会抛 ValueError。
+    """
+    t = s.strip().replace(",", "")
+    mult = 1
+    if t[-1:].lower() == "k":
+        mult, t = 1000, t[:-1]
+    elif t[-1:].lower() == "m":
+        mult, t = 1_000_000, t[:-1]
+    try:
+        return int(round(float(t) * mult))
+    except (ValueError, IndexError):
+        return -1
+
+
 def collect_pinned(f: Fetcher, user: str) -> tuple[list[dict], str]:
     """返回 (pinned 列表, 来源)。GraphQL 优先，HTML 兜底。
 
@@ -183,7 +210,7 @@ def collect_pinned(f: Fetcher, user: str) -> tuple[list[dict], str]:
     html = body.decode("utf-8", errors="replace")
     repos, seen = [], set()
     for block in re.split(r"pinned-item-list-item", html)[1:]:
-        block = block[:2000]
+        block = block[:3000]
         m = re.search(r'href="/([^/"\s]+/[^/"\s#?]+)"', block)
         if not m:
             continue
@@ -191,11 +218,14 @@ def collect_pinned(f: Fetcher, user: str) -> tuple[list[dict], str]:
         if not full.startswith(user + "/") or full in seen:
             continue
         seen.add(full)
-        star = re.search(r"/stargazers\"[^>]*>.{0,400}?>\s*([\d,\.k]+)\s*<", block, re.S)
+        # 星数在 <a href="/o/r/stargazers"> 里，中间隔着一整个 600+ 字符的 svg 图标，
+        # 旧正则用 .{0,400}? 根本跨不过去（2026-11 实测命中 0 次）→ 必须锚到 </svg>
+        star = re.search(r'href="/[^"]*/stargazers"[^>]*>.*?</svg>\s*([\d,\.]+[kKmM]?)',
+                         block, re.S)
         desc = re.search(r'pinned-item-desc[^>]*>\s*([^<]{0,200})', block)
         repos.append({
             "repo": full,
-            "stars": int(star.group(1).replace(",", "")) if star else -1,
+            "stars": parse_count(star.group(1)) if star else -1,
             "desc": (desc.group(1).strip() if desc else ""),
             "fork": "fork" in block.lower()[:800] and "Forked" in block,
         })
@@ -302,19 +332,35 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
 
     # 信号强度：已经有强仓库（★≥500）时，主页装饰是可选甚至负分，
     # 强行「补齐 bio / 建 README」反而是错的建议。
-    max_star = max((p["stars"] for p in pinned), default=0)
-    strong = max_star >= 500
-    target = suggest if strong else must
+    # 关键：星数取不到（无 token + HTML 解析失败）时必须判「未知」，
+    # 不能当成 0 —— 否则会把 ★143k 的账号判成「弱信号、必须全套补齐」。
+    known = [p["stars"] for p in pinned if p["stars"] >= 0]
+    max_star = max(known) if known else -1
+    if not pinned:
+        level = "weak"
+    elif not known:
+        level = "unknown"
+    elif max_star >= 500:
+        level = "strong"
+    else:
+        level = "weak"
+    target = must if level == "weak" else suggest
+
     add(f"# GitHub 主页审计 · `{user['login']}`\n")
+    star_txt = f"★{max_star}" if max_star >= 0 else "取不到（无 token 且页面解析失败）"
     add(f"公开仓库 {user['public_repos']} · followers {user['followers']} "
         f"· 账号创建于 {str(user['created_at'])[:10]}"
-        f" · 最强 pinned 仓库 ★{max_star}\n")
-    if strong:
+        f" · 最强 pinned 仓库 {star_txt}\n")
+    if level == "strong":
         add("> 信号强度：**强**（已有 ★≥500 的仓库）。这一档的仓库本身就能说话，"
             "主页美化是可选项，过度装饰反而是负分。以下问题按「建议」处理。\n")
-    else:
+    elif level == "weak":
         add("> 信号强度：**弱**（没有 ★≥500 的仓库）。这一档主页是主要可控面，"
             "以下问题按「必须修」处理。\n")
+    else:
+        add("> 信号强度：**未能判定**——pin 的仓库一个 star 数都没取到。"
+            "配一个 GITHUB_TOKEN 重跑就能确定分档；在此之前不要把下面的清单当"
+            "「必须修」，先按「建议」看。\n")
 
     # 层 1-2
     add("## 第 1-2 层 · 头像 / 名字 / bio\n")
@@ -322,7 +368,8 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
     add(f"- 名字：`{user['name']}`" if user["name"] else "- 名字：**未设置**（显示的是用户名）")
     bio_len = len(user["bio"])
     if not user["bio"]:
-        add("- bio：**空** → 这是最该先修的")
+        add("- bio：**空** → " + ("这是最该先修的"
+                                 if level == "weak" else "填一句不亏，但这一档不是重点"))
         target.append("填写 bio（160 字符内，角色 + 领域 + 正在做什么 + 想要什么）")
     else:
         flag = "⚠️ 偏长" if bio_len > 160 else "✅"
@@ -430,6 +477,7 @@ def build_report(user: dict, pinned: list[dict], pinned_src: str,
 
 # ---------------------------------------------------------------- main
 def main() -> int:
+    harden_stdout()
     ap = argparse.ArgumentParser(description="GitHub 主页审计")
     ap.add_argument("username")
     ap.add_argument("--token", default=None)
@@ -442,6 +490,13 @@ def main() -> int:
     raw_user = f.json(f"/users/{args.username}")
     if raw_user is None:
         print(f"❌ 取不到 /users/{args.username}（网络或用户名错误）", file=sys.stderr)
+        return 2
+    if raw_user.get("type") == "Organization":
+        print(f"「{args.username}」是组织账号（Organization），不是个人主页。", file=sys.stderr)
+        print("本 skill 的六层模型面向个人：bio、同名 `<user>/<user>` README、"
+              "pinned 的个人叙事，对组织都不成立——组织的 README 放在 "
+              "`<org>/.github/profile/README.md`。", file=sys.stderr)
+        print("换个个人账号跑，或直接按组织规范手改。", file=sys.stderr)
         return 2
     user = collect_user(f, args.username, raw_user)
 

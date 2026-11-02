@@ -11,7 +11,9 @@ README.md 里的 Markdown / <img>
   → 相对路径：改写为 /<user>/<repo>/raw/<branch>/<path>，由 GitHub CDN 直接给
     外链：改写为 https://camo.githubusercontent.com/<sha256>/<hex(原URL)>
   → <picture> 被包成 <themed-picture data-catalyst-inline="true">  【实测】
-  → 浏览器按 CSP 加载：default-src 'none'; img-src data:; style-src 'unsafe-inline'
+  → 浏览器加载。注意这是**两套不同的 CSP**：
+      README 所在页面：default-src 'none'; img-src data:; style-src 'unsafe-inline'  【实测·CSP 头】
+      raw SVG 文件本身：default-src 'none'; style-src 'unsafe-inline'; sandbox      【实测·curl -I】
 ```
 
 **【实测】对比证据**
@@ -32,7 +34,7 @@ README.md 里的 Markdown / <img>
 | `onclick=` 等事件处理器 | 剥离 | 【来源】同上 |
 | `javascript:` 链接 | 剥离 | 【来源】同上 |
 | `<foreignObject>` | 高风险，不保证渲染 | 【来源】 |
-| SVG 内引用远程字体 / `@import` / `<image href="https://...">` | 不加载 | 【来源】CSP `default-src 'none'` |
+| SVG 内引用远程字体 / `@import` / `<image href="https://...">` | 不加载 | 【实测】CSP `default-src 'none'` |
 | `<img>` 里的 `@media (prefers-color-scheme)` | 按**操作系统**判断，且在 WebKit 不生效 | 【来源】WebKit bug 199134 |
 | `#gh-dark-mode-only` / `#gh-light-mode-only` URL 片段 | **已废弃** | 【来源】GitHub Docs |
 
@@ -40,7 +42,23 @@ README.md 里的 Markdown / <img>
 - SMIL 动画（`<animate>` / `<animateTransform>`）—— 贪吃蛇就是这么动的【来源】
 - SVG 内 CSS（`<style>` + `@keyframes`），字体只能用系统字体栈【来源】
 - 透明背景、渐变、滤镜（滤镜别太重）【来源】
-- `data:` URI 内嵌小图标（CSP 明确允许 `img-src data:`）【实测·CSP 头】
+- **`data:` URI 内嵌图片**（官方 logo 走这条）【实测】
+
+#### `data:` URI 到底能不能用（2026-11 结论）
+raw SVG 的响应头是 `default-src 'none'`，**没有** `img-src data:` 豁免，
+按字面读似乎应该把内嵌图片也拦掉。实测不是：
+
+把三个 SVG 用**同一份响应头**（`default-src 'none'; style-src 'unsafe-inline'; sandbox`）
+挂在本地 HTTP 服务上，再用 `<img>` 加载、截图数像素：
+
+| 嵌法 | 红色像素 | 结论 |
+|---|---|---|
+| `<image href="data:image/png;base64,…">` 64×64 纯色 | 4096（= 64×64，完全吻合） | ✅ 显示 |
+| `<image href="http://127.0.0.1/logo.png">` | 0 | ❌ 拦截 |
+| 内联 `<circle r="32">` 对照组 | 3182（≈ π·32²） | ✅ 显示 |
+
+**判据**：外链一律死，`data:` 一律活。所以官方 logo / 头像只能 base64 内嵌，
+一张 64px 头像约 3KB（base64 后 4KB），6 个仓库的卡约 25KB。
 
 ## 3. 结构坑
 
@@ -97,11 +115,14 @@ README.md 里的 Markdown / <img>
 
 ### 6.1 单张 SVG 肉眼检查（最快，零依赖）
 ```bash
-chrome.exe --headless --disable-gpu --screenshot=out.png \
+<chrome> --headless --disable-gpu --screenshot=out.png \
   --window-size=<svg width>,<svg height> file:///<svg 绝对路径>
 ```
-chromium 路径：`C:/Users/<user>/AppData/Local/ms-playwright/chromium-*/chrome-win64/chrome.exe`
-（已装 playwright 就有，不需要 `npm i` 任何东西）
+chromium 怎么找（三个平台都有现成的，不需要 `npm i` 任何东西）：
+- Windows：`C:/Program Files/Google/Chrome/Application/chrome.exe`，
+  或已装 playwright 的 `%LOCALAPPDATA%/ms-playwright/chromium-*/chrome-win64/chrome.exe`
+- macOS：`/Applications/Google Chrome.app/Contents/MacOS/Google Chrome`
+- Linux：`google-chrome` / `chromium` / `chromium-browser`（`command -v` 试一下）
 
 ### 6.2 线上最终态
 ```bash
